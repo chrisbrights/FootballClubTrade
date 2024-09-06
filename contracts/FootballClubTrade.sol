@@ -12,7 +12,6 @@ contract FootballClubTrade {
     uint256 public currentClubId = 0; // Counter for the number of clubs
     uint256 public lastTimestamp = 0;
     uint256 public currentTimestamp = 0;
-    uint256[] lastOpenInterest = new uint256[](clubs.length);
 
     struct Club {
         string name;
@@ -329,21 +328,21 @@ contract FootballClubTrade {
     }
 
     // Function to get the velocity of each club at a specific time
-function getVelocity(uint256 specificTime, uint256 clubId) external view returns (int256) {
-    // Ensure the specific time is valid (i.e., it's in the past)
-    require(specificTime < block.timestamp, "Specific time must be in the past");
+    function getVelocity(uint256 specificTime, uint256 clubId) external view returns (int256) {
+        // Ensure the specific time is valid (i.e., it's in the past)
+        require(specificTime < block.timestamp, "Specific time must be in the past");
 
-    // Find the club with the given clubId
-    for (uint256 i = 0; i < clubs.length; i++) {
-        if (clubs[i].ClubId == clubId) {
-            // Return the velocity of the club
-            return clubs[i].velocity;
+        // Find the club with the given clubId
+        for (uint256 i = 0; i < clubs.length; i++) {
+            if (clubs[i].ClubId == clubId) {
+                // Return the velocity of the club
+                return clubs[i].velocity;
+            }
         }
-    }
 
-    // If the club is not found, revert or return a default value (e.g., 0)
-    revert("Club not found");
-}
+        // If the club is not found, revert or return a default value (e.g., 0)
+        revert("Club not found");
+    }
 
 
 

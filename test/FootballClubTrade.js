@@ -42,13 +42,19 @@ describe("FootballClubTrade", function () {
     tokenContract = await TestToken.deploy();
     await tokenContract.deployed();
 
+    console.log(`Admin: ${ADMIN_ADDRESS}, user: ${USER_ADDRESS}, profit: ${PROFIT_ADDRESS}`);
+
     TOKEN_ADDRESS = tokenContract.address;
+
+    console.log(`token: ${TOKEN_ADDRESS}`);
 
     const FootballClubTrade = await ethers.getContractFactory("FootballClubTrade");
     tradeContract = await FootballClubTrade.deploy(TOKEN_ADDRESS, ADMIN_ADDRESS, PROFIT_ADDRESS);
     await tradeContract.deployed();
 
     CONTRACT_ADDRESS = tradeContract.address;
+
+    console.log(`contract: ${CONTRACT_ADDRESS}`);
 
     //send token to user
     await tokenContract.connect(owner).transfer(USER_ADDRESS, 100_000_000_000);
