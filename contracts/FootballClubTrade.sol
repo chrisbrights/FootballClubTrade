@@ -8,10 +8,12 @@ contract FootballClubTrade {
     uint256 public acceptDeadline = 1296000; // Global variable for acceptance deadline, 15 days as default
     address public ownerAddress;
     address public profitAddress;
+    address public devFundAddress;
     uint256 public feePercentage = 100; // Fee percentage(100X) (e.g., 1% = 100)
     uint256 public currentClubId = 0; // Counter for the number of clubs
     uint256 public lastTimestamp = 0;
     uint256 public currentTimestamp = 0;
+    uint256 public maintenanceSlippageRatio = 20; // 0.2, maintenanceMarginPercentage / initialMarginPercentage
 
     struct Club {
         string name;
@@ -35,10 +37,11 @@ contract FootballClubTrade {
         uint256 stockPrice;
         uint256 status; //1 - open, 2 - closed, 3 - processed
         address userAddress;
+        uint256 leverage;
     }
 
     mapping(uint256 => uint256) public futureDates; // Mapping from order to future date
-    uint256 public futureIndex; // Keeps track of the next order index
+    uint256 public lastFutureIndex; // Keeps track of the next order index
 
     mapping(address => mapping(uint256 => uint256)) userStock; // Maps club number to user address to stock amount
     // Define a struct to keep track of historical data
@@ -58,7 +61,6 @@ contract FootballClubTrade {
 
     Club[] clubs;
     Position[] positions;
-    address[] positionOwners;
 
     modifier onlyOwner() {
         require(msg.sender == ownerAddress);
@@ -132,28 +134,28 @@ contract FootballClubTrade {
             result[i] = clubs[i];
         }
 
-        return clubs;
+        return result;
     }
 
     function registerFutureDate(uint256 _futureDate) external onlyOwner {
-        futureDates[futureIndex] = _futureDate;
-        futureIndex++;
+        futureDates[lastFutureIndex] = _futureDate;
+        lastFutureIndex++;
     }
 
     function updateFutureDate(
-        uint256 orderIndex,
+        uint256 futureIndex,
         uint256 newFutureDate
     ) external onlyOwner {
-        require(orderIndex < futureIndex, "Invalid order index"); // Ensure the index is within the valid range
+        require(futureIndex < lastFutureIndex, "Invalid order index"); // Ensure the index is within the valid range
 
-        futureDates[orderIndex] = newFutureDate;
+        futureDates[futureIndex] = newFutureDate;
     }
 
     function getRegisteredFutureDate(
-        uint256 orderIndex
+        uint256 futureIndex
     ) external view returns (uint256) {
-        require(orderIndex < futureIndex, "Invalid order index");
-        return futureDates[orderIndex];
+        require(futureIndex < lastFutureIndex, "Invalid order index");
+        return futureDates[futureIndex];
     }
 
     // Function to update acceptDeadline
@@ -165,7 +167,17 @@ contract FootballClubTrade {
         return acceptDeadline;
     }
 
-    // Function to set a club's stock price and record the timestamp
+    function liquidate(Position storage position, uint256 loss, uint256 margin) internal {
+        require(position.status == 1, "Position already closed or processed");
+        position.status = 2; // close position
+        if (position.positionType == 1) { // long position
+            token.transfer(devFundAddress, loss > margin ? margin : loss);
+            token.transfer(position.userAddress, loss > margin ? 0 : margin - loss);
+        } else if (position.positionType == 2) { // short position
+            userStock[position.userAddress][position.clubId] += loss > margin ? 0 : (margin - loss) / position.stockPrice;
+        }
+    }
+
     function setClubStockPrice(uint256 clubId, uint256 newStockPrice) external {
         bool clubFound = false;
 
@@ -173,6 +185,26 @@ contract FootballClubTrade {
             if (clubId == clubs[i].ClubId) {
                 addHistoricalPrice(clubId, clubs[i].stockPrice);
                 clubs[i].stockPrice = newStockPrice;
+                // when set club's stockPrice, we need to check each position's margin with equity and run liquidate if needed.
+                for (uint256 j = 0; j < positions.length; j++) {
+                    Position storage position = positions[j];
+
+                    if (position.status == 1 && position.clubId == clubId) {
+                        // check if position loss is over margin.
+                        if ((position.positionType == 1 && newStockPrice < position.stockPrice) || 
+                            (position.positionType == 2 && newStockPrice > position.stockPrice)) {
+                            uint256 loss = position.positionType == 1 
+                                ? (position.stockPrice - newStockPrice) * position.stockAmount  // Long position
+                                : (newStockPrice - position.stockPrice) * position.stockAmount; // Short position
+                            
+                            uint256 margin = position.stockAmount * position.stockPrice / position.leverage;
+                            if (loss > margin * (100 - maintenanceSlippageRatio) / 100) {
+                                liquidate(position, loss, margin);
+                            }
+                        }
+                    }
+                }
+
                 clubFound = true;
                 break;
             }
@@ -180,6 +212,7 @@ contract FootballClubTrade {
 
         require(clubFound, "Club not found");
     }
+    
     function getClubStockPrice(uint256 clubId) external view returns (uint256) {
         for (uint256 i = 0; i < clubs.length; i++) {
             if (clubId == clubs[i].ClubId) {
@@ -344,8 +377,6 @@ contract FootballClubTrade {
         revert("Club not found");
     }
 
-
-
     function setOpenInterest() external {
         // Initialize arrays for long and short stocks
         uint256[] memory totallongstock = new uint256[](clubs.length);
@@ -418,18 +449,24 @@ contract FootballClubTrade {
         return currentAllowance;
     }
 
+    function setMaintenanceSlippageRatio(uint256 _newMaintenanceSlippageRatio) external onlyOwner {
+        maintenanceSlippageRatio = _newMaintenanceSlippageRatio;
+    }
+
     function openPosition(
         uint256 clubId,
         uint256 stockAmount,
         uint256 longShort,
-        uint256 value,
-        uint256 _futureIndex
-    ) external payable {
+        uint256 stockPrice,
+        uint256 futureIndex,
+        uint256 leverage
+    ) external {
+        require(leverage > 0 && leverage <= 50, "Leverage range is 1x to 50x");
         require(clubId < clubs.length, "Club is not registered");
-        require(_futureIndex < futureIndex, "Invalid future index");
+        require(futureIndex < lastFutureIndex, "Invalid future index");
 
         uint256 currentTime = block.timestamp;
-        uint256 adjustedFutureDate = futureDates[_futureIndex];
+        uint256 adjustedFutureDate = futureDates[futureIndex];
 
         require(
             currentTime < adjustedFutureDate - acceptDeadline,
@@ -438,24 +475,23 @@ contract FootballClubTrade {
 
         if (longShort == 2) {
             // Short
+            uint256 margin = stockAmount / leverage;
+            
             require(
-                userStock[msg.sender][clubId] >= stockAmount,
+                userStock[msg.sender][clubId] >= margin,
                 "Insufficient user stock balance"
             );
 
-            userStock[msg.sender][clubId] =
-                userStock[msg.sender][clubId] -
-                stockAmount;
+            userStock[msg.sender][clubId] = userStock[msg.sender][clubId] - margin;
         } else if (longShort == 1) {
             // Long position
-            uint256 tokenAmount = stockAmount * value;
-            require(
-                token.balanceOf(msg.sender) >= tokenAmount,
-                "Insufficient token balance"
-            );
+            // need to put margin. margin = position size / leverage. 
+            uint256 margin = stockAmount * stockPrice / leverage;
+            
+            require(token.balanceOf(msg.sender) >= margin, "Insufficient token balance to satisfy margin payment");
 
             require(
-                token.transferFrom(msg.sender, address(this), tokenAmount),
+                token.transferFrom(msg.sender, address(this), margin),
                 "Token transfer failed"
             );
         } else {
@@ -464,16 +500,18 @@ contract FootballClubTrade {
 
         positions.push(
             Position(
-                _futureIndex,
+                futureIndex,
                 clubId,
                 longShort,
                 stockAmount,
-                value,
+                stockPrice,
                 1,
-                msg.sender
+                msg.sender,
+                leverage
             )
         );
     }
+
 
     function closePosition(uint256 positionId) external {
         require(positionId < positions.length, "Position not exist");
@@ -485,28 +523,24 @@ contract FootballClubTrade {
     }
 
     function closePositionInternal(uint256 positionId) internal {
-        Position memory position = positions[positionId];
+        // Directly reference the position in storage
+        Position storage position = positions[positionId];
+        
         require(position.status == 1, "Position already closed or processed");
+        
         address userAddress = position.userAddress;
+        uint256 refundAmount;
 
         if (position.positionType == 1) {
-            uint256 tokenAmount = (position.stockPrice *
-                position.stockAmount *
-                (10000 - feePercentage)) / 10000;
-            require(
-                token.transfer(userAddress, tokenAmount),
-                "Token transfer failed"
-            );
+            refundAmount = (position.stockPrice * position.stockAmount / position.leverage * (10000 - feePercentage)) / 10000;
+            require(token.transfer(userAddress, refundAmount), "Token transfer failed");
         } else if (position.positionType == 2) {
-            userStock[userAddress][position.clubId] =
-                userStock[userAddress][position.clubId] +
-                position.stockAmount;
+            userStock[userAddress][position.clubId] += position.stockAmount / position.leverage;
         } else {
-            revert("Invalid longShort value");
+            revert("Invalid position type");
         }
 
-        position.status = 2;
-        positions[positionId] = position;
+        position.status = 2; // Mark position as closed
     }
 
     function getOpenPosition(
@@ -519,44 +553,34 @@ contract FootballClubTrade {
         return position;
     }
 
-    function executeFuture(uint256 _futureIndex) external {
+    function executeFuture(uint256 futureIndex) external {
+        // first need to check if current timestamp is over the futureDate. 
+        require(futureIndex < lastFutureIndex, "future contract does not exist.");
+        require(block.timestamp > futureDates[futureIndex], "future contract time not arrived yet");
+
         for (uint256 i = 0; i < positions.length; i++) {
             Position memory position = positions[i];
-            if (position.futureId != _futureIndex || position.status != 1)
+            if (position.futureId != futureIndex || position.status != 1)
                 continue;
 
             uint256 clubId = position.clubId;
-            uint256 currentPrice = clubs[clubId].stockPrice;
             if (position.positionType == 1) {
                 //Long
-                if (currentPrice <= position.stockPrice) {
-                    //process position
-                    position.status = 3;
-                    positions[i] = position;
-                    userStock[position.userAddress][clubId] =
-                        userStock[position.userAddress][clubId] +
-                        position.stockAmount;
-                } else {
-                    //close position
-                    closePositionInternal(i);
-                }
+                //process position
+                position.status = 3;
+                positions[i] = position;
+                userStock[position.userAddress][clubId] =
+                    userStock[position.userAddress][clubId] +
+                    position.stockAmount;
             } else {
                 //Short
-                if (currentPrice >= position.stockPrice) {
-                    //process position
-                    position.status = 3;
-                    positions[i] = position;
-                    userStock[position.userAddress][clubId] =
-                        userStock[position.userAddress][clubId] -
-                        position.stockAmount;
-                    uint256 tokenAmount = (position.stockPrice *
-                        position.stockAmount *
-                        (10000 - feePercentage)) / 10000;
-                    token.transfer(position.userAddress, tokenAmount);
-                } else {
-                    //close position
-                    closePositionInternal(i);
-                }
+                //process position
+                position.status = 3;
+                positions[i] = position;
+                uint256 tokenAmount = (position.stockPrice *
+                    position.stockAmount *
+                    (10000 - feePercentage)) / 10000;
+                token.transfer(position.userAddress, tokenAmount);
             }
         }
     }
